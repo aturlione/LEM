@@ -7,6 +7,7 @@ import datetime
 import socket
 from urllib3.connection import HTTPConnection
 
+
 HTTPConnection.default_socket_options = (
     HTTPConnection.default_socket_options + [
         (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
@@ -16,7 +17,7 @@ HTTPConnection.default_socket_options = (
     ]
 )
 
-class LEM:
+class LEM():
 
       
     #Método para obtener los datos de los diferentes métodos que hay en la API 
@@ -285,8 +286,339 @@ class LEM:
 
         frames = [df_sim_historical, df_sim_historical_updated, df_forecast]
         result = pd.concat(frames)
+        
+        response = result.loc[initial_date:final_date]
+        response = self.changeformat(response)
 
-        return result.loc[initial_date:final_date]
+        return response
+        
+#--------------------------------------------------------------------------------------
+#   Metodo para cambiar keys de datestemp a string y de pandas a dict.
+    def changeformat(self,response):
+        dates = [str(response.index[i]) for i in range(0,len(response.index))]
+        response = response.to_dict()
+
+       
+        responseq ={dates[i]: list(response['q'].values())[i] for i in range(0,len(dates))}
+        responserun ={dates[i]: list(response['run'].values())[i] for i in range(0,len(dates))}
+        responseprecprom ={dates[i]: list(response['precprom'].values())[i] for i in range(0,len(dates))}
+        responsepetprom ={dates[i]: list(response['petprom'].values())[i] for i in range(0,len(dates))}
+        responsesnow ={dates[i]: list(response['snow'].values())[i] for i in range(0,len(dates))}
+        responsemelting={dates[i]: list(response['melting'].values())[i] for i in range(0,len(dates))}
+
+        response = {'q':responseq, 'run':responserun, 'precprom':responseprecprom, 'petprom':responsepetprom, 'snow':responsesnow, 'melting':responsemelting}
+        return response
+#------------------------------------------------------
+
+#------------------------------------------------------
+#Modelo MELCA
+
+    def run_melca(self,inputs):
+        base_dir = os.getcwd()
+        # %0- FICHEROS DE ENTRADA
+        fichpar='Param_Chambo_niv7.xlsx' #%fichero de parametros
+        fichdat='series_Chambo_niv7.xlsx' #%fichero de series
+        fichres1='res_MELCA.xlsx' #%resultados generales
+        fichres2='res_series.xlsx' #%resultados-series
+        vcres=73 #%id cuenca para grÃ¡ficas
+
+        #%1-LECTURA DE DATOS
+        modelname='fun_MELCA_v1'
+        #%1.1- Lee fichero de param con topologia de la red
+        #matpar=readtable(fichpar)
+        matpar=LEM().obtain_data(inputs)
+        matpar=pd.DataFrame(matpar)
+        vc=matpar.id #cÃ³digos de las cuencas del fichero de parametros
+        vc_str=[str(list(vc)[i]) for i in range(0,len(vc))]
+        vd=matpar.fin #codigos cuencas destino
+        
+        vecs0=matpar.s0
+        vecfcp=matpar.fcp
+        vecfce=matpar.fce
+        area=matpar.area
+
+        nc=len(vc) # %nÂºde cuencas
+        ncol=max(vc); #max valor del id de cuencas (columnas de la matriz de datos de clima)
+
+
+        #1.2- Lee series hidroclimÃ¡ticas:Prec, temp_min, temp_max por subcuencas
+        inputs_prec = {'section':'MELCA/prec'}
+        inputs_tmin = {'section':'MELCA/tmin'}
+        inputs_tmax = {'section':'MELCA/tmax'}
+
+        datosprec=LEM().obtain_data(inputs_prec)
+        datosprec=pd.DataFrame.from_dict(datosprec)
+        datostmin=LEM().obtain_data(inputs_tmin)
+        datostmin=pd.DataFrame.from_dict(datostmin)
+        datostmax=LEM().obtain_data(inputs_tmax)
+        datostmax=pd.DataFrame.from_dict(datostmax)
+        
+        datosprec.index = pd.to_datetime(datosprec.index,unit='ms')
+        datostmin.index = pd.to_datetime(datostmin.index,unit='ms')
+        datostmax.index = pd.to_datetime(datostmax.index,unit='ms')
+
+        
+        vcser=datosprec.columns #códigos de las cuencas del fichero de series
+        vcser_str=list(datosprec.columns)
+        vcser=[int(list(vcser)[i]) for i in range(0,len(list(vcser)))]
+        
+
+        # comprueba que hay datos para todas las cuencas del fichero de param
+        # if list(vc)!=list(vcser):
+        #     print('Hay cuencas sin serie climática asociada')
+
+        #Fecha comienzo de las series: 1/1/2002
+        n0=datetime.date.toordinal(datetime.date(2002,1,1)) #fecha del primer dato disponible
+        fechainic=datetime.date(2002,1,1)  #fecha de inicio de simulaciÃ³n
+        fechafin=datetime.date(2019,12,31)  #fecha de final de simulaciÃ³n ---> la feca final estaba mal?
+        ni=datetime.date.toordinal(fechainic)-n0+1
+        nf=datetime.date.toordinal(fechafin)-n0+1 #-----> la posicion no coincide con la fecha final
+        # fechas=datetime(fechainic):datetime(fechafin);
+        nd=nf-ni+1 #n de datos
+
+
+        
+
+        #Obtiene el vector de equivalencia entre vc y vcser
+        vceq=[]
+        for i in range(0,nc):
+            index=vcser.index(list(vc)[i])
+            vceq.append(vcser[index])
+        
+        #Series climaticas según el orden de vc, con los factores fcp y fce
+        #la primera fila y columna son cabeceros y fechas (en python no es necesario sumar 1, ya que reconoce las cabeceras)
+        prec=datosprec.iloc[ni:nf][vc_str]
+        factors=numpy.matlib.repmat(np.array(list(vecfcp)), nd-1,1) #tengo que restar 1 porque empieza a contar en 0
+        prec=prec*factors #aplica coef. corr. de prec.
+        tmin=datostmin.iloc[ni:nf][vc_str]
+        tmax=datostmax.iloc[ni:nf][vc_str]
+
+        #2- EJECUTA EL MELCA POR SUBCUENCAS
+        qsims=[]
+
+        pet=[]
+
+        area_ac=[]
+        prec_ac=[]
+        pet_ac=[]
+        qsim=[]
+        qsim_ac=[]
+
+        precmed=[]
+        petmed=[]
+        qmed=[]
+        precmed_ac=[]
+        petmed_ac=[]
+        qmed_ac=[]
+        ce_ac=[]
+        smax=[]
+        
+
+        for i in range(0,len(vc)):
+            #disp(['cuenca-' num2str(ic)])
+            index= vc_str[i]
+            datstr=pd.concat([prec[index],tmin[index],tmax[index]], axis=1)
+            datstr.columns=['prec','tmin','tmax']
+            
+            # # par=[ tau  S0  fcp fce]
+            par= np.array([matpar.tau[i],vecs0[i],vecfcp[i],vecfce[i]])
+            output_melca=self.fun_MELCA_v1(par,datstr) #calcula caudales espec.
+            
+            qsims.append(output_melca['qsim'])
+            pet.append(output_melca['pet'])
+            smax.append(output_melca['smax'])
+            fa=list(area)[i]*1000/(3600*24) #de mm/d a m3/s
+            qsim.append(fa*output_melca['qsim'])
+            precmed.append(365.25*np.mean(prec[index]))
+            petmed.append(365.25*np.mean(output_melca['pet']))
+            qmed.append(np.mean(fa*output_melca['qsim']))
+            # %disp(['Qmed: ' num2str(qmed(i)) '  m3/s']);
+
+        #3- CALCULA LAS SERIES ACUMULADAS
+        set_vc=set(vc)
+        set_vd=set(vd)
+
+        cc= list(set_vc.difference(set_vd))
+
+        #cc=setdiff(vc,vd) #Obtiene cuencas de cabecera (las que no son destino de ninguna)
+        ncc=len(cc)
+        matcon=np.identity(nc)  #matriz de conectividades acum. Fila: cuenca receptora; col:cuencas tributarias
+        prec_np=np.matrix(prec.to_numpy())
+        pet_np=np.transpose(np.matrix(pet))
+        qsim_np=np.transpose(np.matrix(qsim))
+        print(np.shape(qsim))
+        print(np.shape(qsim_np))
+        #Calcula matriz de conectividades
+        for i in range(0,ncc):
+            ipos=list(vc).index(cc[i])
+            cdes=vd[ipos] #código de destino
+            ipostot=[]
+            ides=[list(vc).index(cdes)][0]
+
+            while cdes>0: #codigo de la cuenca de desembocadura
+                
+                ides=[list(vc).index(cdes)][0]
+                ipostot.append(ipos)
+                matcon[ides,ipos]=1
+                ipos=ides
+                cdes=vd[ipos]
+        
+        for i in range(0,nc):
+            ctrib=matcon[i,:]==1 #cuencas tributarias
+
+            area_ac_val=sum(area[ctrib])
+            prec_ac_num=np.sum(np.multiply(prec_np[:,ctrib],list(area[ctrib])),1)
+            prec_ac_val=prec_ac_num/area[i]
+            pet_ac_num=np.sum(np.multiply(list(area[ctrib]),pet_np[:,ctrib]),1)
+            pet_ac_val=pet_ac_num/area[i]
+            qsim_ac_val=np.sum(qsim_np[:,ctrib],1) 
+            precmed_ac_val=365.25*np.mean(prec_ac_val,0)
+            petmed_ac_val=365.25*np.mean(pet_ac_val,0)
+            qmed_ac_val=np.mean(qsim_ac_val,0)
+            fa=area_ac_val*1000/(3600*24)#de mm/d a m3/s
+            ce_ac_val=np.divide(qmed_ac_val,(fa*precmed_ac_val/365.25))
+
+            area_ac.append(area_ac_val)
+            prec_ac.append(prec_ac_val)
+            pet_ac.append(pet_ac_val)
+            qsim_ac.append(np.transpose(qsim_ac_val))
+            precmed_ac.append(precmed_ac_val[0,0])
+            petmed_ac.append(petmed_ac_val[0,0])            
+            qmed_ac.append(qmed_ac_val[0,0])
+            ce_ac.append(ce_ac_val[0,0])
+            
+
+
+        
+        q20_ac=np.quantile(qsim_ac, 0.2,2)
+        q50_ac=np.quantile(qsim_ac, 0.5,2)
+        q80_ac=np.quantile(qsim_ac, 0.8,2)
+        q20_ac=np.transpose(q20_ac)[0]
+        q50_ac=np.transpose(q50_ac)[0]
+        q80_ac=np.transpose(q80_ac)[0]
         
 
 
+    # %%%%%%%%%%%%%%%%%%%%%%RESULTADOS%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    # Escribe resultados a fichero
+        
+        array2table = {'id':vc,'area':area,'area_ac':area_ac,'precmed':precmed,'petmed':petmed, 'qmed':qmed, 'precmed_ac':precmed_ac,
+        'petmed_ac': petmed_ac,'qmed_ac': qmed_ac,'ce_ac': ce_ac,'q20_ac': q20_ac,'q50_ac': q50_ac,'q80_ac': q80_ac}       
+
+        trestor=pd.DataFrame(array2table)
+        
+        # df_sim_historical_updated = pd.DataFrame(index=df_obs[initial_simulation:].index, data=np.array(res).T,
+        #                                             columns=["q", "run", "precprom", "petprom",
+        #                                                     "snow", "melting"])
+                
+        trestor.to_excel(os.path.join(base_dir, "OUTPUTS", fichres1))
+
+        idc=vc==vcres
+        print('Pmed: ', trestor['precmed_ac'][idc])
+        print('PETmed: ', trestor['petmed_ac'][idc])
+        print('Qmed: ', trestor['qmed_ac'][idc])
+        print('Q50: ', trestor['q50_ac'][idc])
+        print('Q80/Q20: ', trestor['q80_ac'][idc]/trestor['q20_ac'][idc])
+        # print('CN: ', 25400/(smax(idc)+254))
+            
+        # %%%%%%%%%%%%%%%%%%%%%%%%%  GRÃFICOS %%%%%%%%%%%%%%%%%%%%%%%%%%%
+        # Gráficas por meses (box-whiskers)
+        # tipovar 1:pre; 2:pet, 3: caudal
+        self.fun_acum(prec_ac[:,idc],fechainic,fechafin,1)
+        # [tspetm,tspeta]= fun_acum(pet_ac(:,idc),fechainic,fechafin,2);
+        # [tsqm,tsqa]= fun_acum(qsim_ac(:,idc),fechainic,fechafin,3);
+
+        # pm=tspm.yd;
+        # qm=tsqm.yd; %Valores mensuales
+        # fm=tsqm.Time;
+        # qa=tsqa.yd; %Valores anuales
+        # fa=tsqa.Time;
+        # pa=tspa.yd;
+
+    #-------------------------------------------------------------------------------
+    #Modelo hidrológico basado en la ec. logí­stica con 4 parametros (diario)
+    #*********************** READS PARS AND DATA******************************
+    def fun_MELCA_v1(self,par,data):
+        fce=par[3]
+
+        prec=np.array(data['prec'])
+        tmin=list(data['tmin'])
+        tmax=list(data['tmax'])
+        
+        tmed=[(tmin[i]+tmax[i])/2 for i in range(0,len(tmin))]
+        pet=[fce*12.642/365.25*(tmed[i]+17.8)*(tmax[i]-tmin[i])**0.5 for i in range(0,len(tmin))]
+        # %errty=data{4};
+        # %ndcal=data{5};
+
+        qinic=statistics.mean(prec)*math.exp(-statistics.mean(pet)/statistics.mean(prec))
+
+        kq=1/par[0] #param desfase (inverso del tiempo caracterÃ­stico)
+        kp0=1/par[1] #inverso de la capac de suelo S0
+        tlan=25.465*math.log(par[1])-19.494
+        lan=1/tlan
+        c1=1 #param de Schreiber (fijo)
+
+        #  Initialization
+        nd=len(prec)
+        rsim=np.zeros((nd,1)) #runoff series
+        qsim=np.zeros(nd) #discharge series
+        precprom=np.zeros((nd,1))
+        petprom=np.zeros((nd,1))
+
+        #********dynamic aridity ratio*********
+        precprom[0]=statistics.mean(prec)/lan
+        petprom[0]=statistics.mean(pet)/lan
+        rsim[0]=qinic
+        qsim[0]=qinic
+        aux1=math.exp(-lan)
+        aux2=(1-aux1)/lan
+
+        for i in range(1,nd):
+            precprom[i]=aux1*precprom[i-1]+aux2*prec[i]
+            petprom[i]=aux1*petprom[i-1]+aux2*pet[i]
+        
+        arin=[petprom[i]/precprom[i] for i in range(0,len(petprom))]
+        #marin=harmmean(arin)
+        ceq=[math.exp(-c1*arin[i]) for i in range(0,len(arin))] #Schreiber modified
+
+        kp=kp0*prec
+        req=[prec[i]*ceq[i] for i in range(0,len(prec))]
+        
+        for i in range(1,nd):
+            #RUNOFF GENERATION
+            if req[i]>0:
+                rsim[i]=req[i]*math.exp(kp[i])*rsim[i-1]/(req[i]+(-1+math.exp(kp[i]))*rsim[i-1])
+            else:
+                rsim[i]=(ceq[i])*rsim[i-1]/((ceq[i])+kp0*rsim[i-1])
+         
+
+        for i in range(1,nd):
+            # RUNOFF ROUTING
+            qsim[i]=rsim[i-1]+(rsim[i]-rsim[i-1])*(1-1/kq)+math.exp(-kq)*(qsim[i-1]-rsim[i-1]+(rsim[i]-rsim[i-1])/kq)
+        
+        smax=np.mean(petprom) 
+        
+        return {'qsim':qsim,'pet':pet,'smax':smax}
+
+        
+    #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    #  self.fun_acum(prec_ac[:,idc],fechainic,fechafin,1)
+    def  fun_acum(self,yd,dateinic,datefin,tvar):
+        
+    #  NOTA: revisar fechas y los nombres de ejes y tí­tulo del gráfico generado
+        dates =[range(dateinic,datefin)]
+        timetable={'date':dates,'yd':yd}
+        tsyd=pd.DataFrame(timetable)
+        
+    # tsyd = timetable([dateinic:datefin]', yd);
+
+    # switch tvar
+    #     case {1,2} %prec/pet
+    #         tspm=convert2monthly(tsyd,'Aggregation','sum');
+    #         tspa=convert2annual(tsyd,'Aggregation','sum');
+    #     case 3 %Caudal
+    #         tspm=convert2monthly(tsyd,'Aggregation','mean');
+    #         tspa=convert2annual(tsyd,'Aggregation','mean');
+    # end
+    # end
+                    
